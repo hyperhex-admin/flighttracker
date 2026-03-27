@@ -179,6 +179,53 @@ def get_flight_path(
     }
 
 
+@app.get("/api/v1/flights")
+def get_available_flights(
+    minutes: int = Query(1440, ge=1, le=10080),
+    date: Optional[str] = Query(None)
+):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    if date:
+        query = """
+            SELECT identifier, origin_country, COUNT(*) as point_count, 
+                   MIN(timestamp) as first_seen, MAX(timestamp) as last_seen
+            FROM position_history
+            WHERE timestamp::date = %s
+            GROUP BY identifier, origin_country
+            ORDER BY point_count DESC
+            LIMIT 100
+        """
+        cur.execute(query, (date,))
+    else:
+        query = """
+            SELECT identifier, origin_country, COUNT(*) as point_count,
+                   MIN(timestamp) as first_seen, MAX(timestamp) as last_seen
+            FROM position_history
+            WHERE timestamp > NOW() - INTERVAL '%s minutes'
+            GROUP BY identifier, origin_country
+            ORDER BY point_count DESC
+            LIMIT 100
+        """
+        cur.execute(query, (minutes,))
+    
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    return [
+        {
+            "identifier": row[0],
+            "origin_country": row[1],
+            "point_count": row[2],
+            "first_seen": row[3].isoformat() if row[3] else None,
+            "last_seen": row[4].isoformat() if row[4] else None
+        }
+        for row in rows
+    ]
+
+
 @app.get("/api/v1/time-range")
 def get_time_range():
     conn = get_db_connection()

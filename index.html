@@ -45,15 +45,27 @@
             </div>
             <div class="flex items-center gap-2">
                 <label class="text-gray-400 text-sm">History:</label>
-                <select id="history-minutes" class="bg-gray-700 text-white px-2 py-1 rounded text-sm border border-gray-600" onchange="loadTimeRange()">
+                <select id="history-minutes" class="bg-gray-700 text-white px-2 py-1 rounded text-sm border border-gray-600" onchange="onHistoryChange()">
                     <option value="5">5 min</option>
                     <option value="15">15 min</option>
                     <option value="30">30 min</option>
                     <option value="60" selected>1 hour</option>
                     <option value="180">3 hours</option>
                     <option value="360">6 hours</option>
+                    <option value="1440">24 hours</option>
+                    <option value="4320">3 days</option>
+                    <option value="10080">7 days</option>
                 </select>
             </div>
+            <div class="flex items-center gap-2">
+                <label class="text-gray-400 text-sm">Date:</label>
+                <input type="date" id="filter-date" 
+                       class="bg-gray-700 text-white px-2 py-1 rounded text-sm border border-gray-600"
+                       onchange="onHistoryChange()">
+            </div>
+            <button onclick="showFlightList()" class="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded text-sm">
+                📋 Flights List
+            </button>
             <button onclick="togglePlayback()" id="play-btn" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm">
                 ▶ Play
             </button>
@@ -134,6 +146,60 @@
                 console.log('Time range:', data);
             } catch (error) {
                 console.error('Error loading time range:', error);
+            }
+        }
+
+        async function onHistoryChange() {
+            if (selectedFlightId) {
+                await showPath(selectedFlightId);
+            }
+        }
+
+        async function fetchAvailableFlights() {
+            const dateInput = document.getElementById('filter-date').value;
+            const minutes = document.getElementById('history-minutes').value;
+            
+            let url = window.location.origin + '/api/v1/flights';
+            const params = new URLSearchParams();
+            if (dateInput) params.append('date', dateInput);
+            params.append('minutes', minutes);
+            url += '?' + params.toString();
+            
+            try {
+                const response = await fetch(url);
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching flights:', error);
+                return [];
+            }
+        }
+
+        async function showFlightList() {
+            const flights = await fetchAvailableFlights();
+            
+            if (!flights || flights.length === 0) {
+                alert('No flights found for selected time range');
+                return;
+            }
+            
+            const flightsList = flights.slice(0, 50).map(f => 
+                `${f.identifier} - ${f.origin_country || 'Unknown'} (${f.point_count} pts)`
+            ).join('\n');
+            
+            const selection = prompt('Select flight ID (copy from list):\n\n' + flightsList);
+            if (selection) {
+                document.getElementById('filter-id').value = selection.split(' ')[0].trim();
+                await refreshMap();
+                
+                setTimeout(async () => {
+                    const features = window.currentFeatures || [];
+                    if (features.length > 0) {
+                        const flight = features.find(f => f.properties.identifier === selection.split(' ')[0].trim());
+                        if (flight) {
+                            showPath(flight.properties.identifier);
+                        }
+                    }
+                }, 1000);
             }
         }
 
