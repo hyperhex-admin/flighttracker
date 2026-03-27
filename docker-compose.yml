@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgis/postgis:15-3.3
+    environment:
+      POSTGRES_DB: traffic
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./index.html:/app/index.html
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: traffic
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:

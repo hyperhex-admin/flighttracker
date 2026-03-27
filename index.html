@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Global Nomad Tracker</title>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-rotatedmarker@0.2.0/leaflet.rotatedmarker.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        #map { height: calc(100vh - 140px); }
+        .plane-icon { filter: hue-rotate(200deg); }
+        .ship-icon { filter: hue-rotate(180deg); }
+        .time-slider { -webkit-appearance: none; height: 8px; border-radius: 4px; background: #374151; }
+        .time-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: #3B82F6; cursor: pointer; }
+    </style>
+</head>
+<body class="bg-gray-900">
+    <nav class="bg-gray-800 border-b border-gray-700 px-4 py-3">
+        <div class="flex items-center justify-between mb-3">
+            <h1 class="text-xl font-bold text-white">Global Nomad Tracker</h1>
+            <div class="flex items-center gap-4">
+                <div class="text-sm text-gray-400">
+                    <span class="text-blue-400">✈️ Flights: <span id="flight-count">0</span></span>
+                </div>
+                <button onclick="refreshMap()" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm">
+                    Refresh
+                </button>
+            </div>
+        </div>
+        
+        <div class="flex flex-wrap items-center gap-4">
+            <div class="flex items-center gap-2">
+                <label class="text-gray-400 text-sm">Country:</label>
+                <input type="text" id="filter-country" placeholder="e.g. Germany" 
+                       class="bg-gray-700 text-white px-2 py-1 rounded text-sm w-32 border border-gray-600"
+                       onchange="refreshMap()">
+            </div>
+            <div class="flex items-center gap-2">
+                <label class="text-gray-400 text-sm">Flight ID:</label>
+                <input type="text" id="filter-id" placeholder="e.g. 4AC9C4" 
+                       class="bg-gray-700 text-white px-2 py-1 rounded text-sm w-24 uppercase border border-gray-600"
+                       onchange="refreshMap()">
+            </div>
+            <div class="flex items-center gap-2">
+                <label class="text-gray-400 text-sm">History:</label>
+                <select id="history-minutes" class="bg-gray-700 text-white px-2 py-1 rounded text-sm border border-gray-600" onchange="loadTimeRange()">
+                    <option value="5">5 min</option>
+                    <option value="15">15 min</option>
+                    <option value="30">30 min</option>
+                    <option value="60" selected>1 hour</option>
+                    <option value="180">3 hours</option>
+                    <option value="360">6 hours</option>
+                </select>
+            </div>
+            <button onclick="togglePlayback()" id="play-btn" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm">
+                ▶ Play
+            </button>
+            <span id="playback-time" class="text-gray-400 text-sm font-mono"></span>
+        </div>
+    </nav>
+    
+    <div id="map"></div>
+
+    <script>
+        const API_URL = window.location.origin + '/api/v1/traffic';
+        const PATH_API = window.location.origin + '/api/v1/path/';
+        const TIME_API = window.location.origin + '/api/v1/time-range';
+        
+        const map = L.map('map').setView([20, 0], 2);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors',
+            maxZoom: 18
+        }).addTo(map);
+
+        const planeIcon = L.divIcon({
+            className: 'plane-icon',
+            html: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#3B82F6"><path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/></svg>`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12]
+        });
+
+        const shipIcon = L.divIcon({
+            className: 'ship-icon',
+            html: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#10B981"><path d="M20 21c-1.39 0-2.78-.47-4-1.32-2.44-1.71-5.56-1.71-8 0-1.22.85-2.61 1.32-4 1.32v-2c1.38 0 2.74-.35 4-.99 2.52-1.29 5.48-1.29 8 0 1.26.64 2.62.99 4 .99v-2zM12 4l-8 4v4h16v-4l-8-4zm0 7c-1.66 0-3-1.34-3-3 0-1.66 1.34-3 3-3s3 1.34 3 3-1.34 3-3 3z"/></svg>`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12]
+        });
+
+        const markers = new Map();
+        let selectedFlightId = null;
+        let pathLayer = null;
+        let playbackMode = false;
+        let playbackInterval = null;
+        let playbackData = [];
+
+        async function fetchTraffic() {
+            const country = document.getElementById('filter-country').value;
+            const identifier = document.getElementById('filter-id').value;
+            
+            let url = API_URL;
+            const params = new URLSearchParams();
+            if (country) params.append('country', country);
+            if (identifier) params.append('identifier', identifier);
+            
+            if (params.toString()) url += '?' + params.toString();
+            
+            try {
+                const response = await fetch(url);
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching traffic:', error);
+                return { features: [] };
+            }
+        }
+
+        async function fetchFlightPath(identifier) {
+            const minutes = document.getElementById('history-minutes').value;
+            try {
+                const response = await fetch(PATH_API + identifier + '?minutes=' + minutes);
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching path:', error);
+                return { features: [] };
+            }
+        }
+
+        async function loadTimeRange() {
+            try {
+                const response = await fetch(TIME_API);
+                const data = await response.json();
+                console.log('Time range:', data);
+            } catch (error) {
+                console.error('Error loading time range:', error);
+            }
+        }
+
+        function updateMarkers(features) {
+            const currentIds = new Set();
+
+            features.forEach(feature => {
+                const { identifier, category, velocity, heading, altitude, callsign, origin_country, last_update } = feature.properties;
+                const [lng, lat] = feature.geometry.coordinates;
+
+                currentIds.add(identifier);
+
+                const isFlight = category === 'flight';
+                const icon = isFlight ? planeIcon : shipIcon;
+
+                let marker = markers.get(identifier);
+                if (marker) {
+                    marker.setLatLng([lat, lng]);
+                    marker.setRotationAngle(heading);
+                } else {
+                    marker = L.marker([lat, lng], {
+                        icon: icon,
+                        rotationAngle: heading,
+                        rotationOrigin: 'center center'
+                    });
+                    
+                    const popupContent = `
+                        <div class="text-sm">
+                            <strong>${identifier}</strong><br>
+                            <span class="text-gray-500">${origin_country || 'Unknown'}</span><br>
+                            Type: ${category}<br>
+                            Speed: ${(velocity || 0).toFixed(1)} kts<br>
+                            Heading: ${heading}°<br>
+                            Altitude: ${(altitude || 0).toFixed(0)} m<br>
+                            ${callsign ? `Callsign: ${callsign}<br>` : ''}
+                            <small class="text-gray-500">${new Date(last_update).toLocaleString()}</small><br>
+                            <button onclick="showPath('${identifier}')" class="mt-2 bg-blue-600 text-white px-2 py-1 rounded text-xs w-full">
+                                Show Flight Path
+                            </button>
+                        </div>
+                    `;
+                    
+                    marker.bindPopup(popupContent);
+                    marker.addTo(map);
+                    markers.set(identifier, marker);
+                }
+            });
+
+            markers.forEach((marker, id) => {
+                if (!currentIds.has(id)) {
+                    map.removeLayer(marker);
+                    markers.delete(id);
+                }
+            });
+        }
+
+        function updateStats(features) {
+            document.getElementById('flight-count').textContent = features.length;
+        }
+
+        async function showPath(identifier) {
+            selectedFlightId = identifier;
+            const data = await fetchFlightPath(identifier);
+            
+            if (pathLayer) {
+                map.removeLayer(pathLayer);
+            }
+            
+            if (data.features.length < 2) {
+                alert('Not enough historical data for this flight');
+                return;
+            }
+            
+            const coordinates = data.features.map(f => {
+                const [lng, lat] = f.geometry.coordinates;
+                return [lat, lng];
+            });
+            
+            pathLayer = L.polyline(coordinates, {
+                color: '#3B82F6',
+                weight: 3,
+                opacity: 0.8
+            }).addTo(map);
+            
+            map.fitBounds(pathLayer.getBounds(), { padding: [50, 50] });
+            
+            if (playbackMode) {
+                playbackData = data.features;
+                startPlayback();
+            }
+        }
+
+        function togglePlayback() {
+            playbackMode = !playbackMode;
+            const btn = document.getElementById('play-btn');
+            
+            if (playbackMode) {
+                btn.textContent = '⏹ Stop';
+                btn.className = 'bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm';
+                if (playbackData.length > 0) {
+                    startPlayback();
+                }
+            } else {
+                btn.textContent = '▶ Play';
+                btn.className = 'bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm';
+                stopPlayback();
+            }
+        }
+
+        function startPlayback() {
+            if (playbackInterval) clearInterval(playbackInterval);
+            
+            let index = 0;
+            const timeDisplay = document.getElementById('playback-time');
+            
+            playbackInterval = setInterval(() => {
+                if (index >= playbackData.length) {
+                    index = 0;
+                }
+                
+                const point = playbackData[index];
+                if (point) {
+                    const [lng, lat] = point.geometry.coordinates;
+                    const props = point.properties;
+                    
+                    timeDisplay.textContent = new Date(props.timestamp).toLocaleTimeString();
+                    
+                    const marker = markers.get(selectedFlightId);
+                    if (marker) {
+                        marker.setLatLng([lat, lng]);
+                        marker.setRotationAngle(props.heading);
+                        marker.setPopupContent(`
+                            <div class="text-sm">
+                                <strong>${props.identifier}</strong><br>
+                                Speed: ${(props.velocity || 0).toFixed(1)} kts<br>
+                                Altitude: ${(props.altitude || 0).toFixed(0)} m<br>
+                                <small>${new Date(props.timestamp).toLocaleString()}</small>
+                            </div>
+                        `);
+                    }
+                    
+                    if (pathLayer) {
+                        const currentBounds = pathLayer.getBounds();
+                        if (!currentBounds.contains([lat, lng])) {
+                            map.setView([lat, lng], map.getZoom());
+                        }
+                    }
+                    
+                    index++;
+                }
+            }, 500);
+        }
+
+        function stopPlayback() {
+            if (playbackInterval) {
+                clearInterval(playbackInterval);
+                playbackInterval = null;
+            }
+            playbackData = [];
+            document.getElementById('playback-time').textContent = '';
+        }
+
+        async function refreshMap() {
+            const data = await fetchTraffic();
+            updateMarkers(data.features);
+            updateStats(data.features);
+        }
+
+        loadTimeRange();
+        refreshMap();
+        setInterval(refreshMap, 30000);
+    </script>
+</body>
+</html>
